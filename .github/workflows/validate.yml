@@ -1,0 +1,73 @@
+name: Validate
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  marketplace-and-plugin:
+    name: Marketplace JSON + plugin validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Validate marketplace.json parses and registers both plugins
+        run: |
+          node -e "
+          const m = require('./.claude-plugin/marketplace.json');
+          const names = m.plugins.map(p => p.name).sort();
+          const want = ['group-b-expert-eval', 'mobilework-expert-manager'];
+          if (JSON.stringify(names) !== JSON.stringify(want))
+            throw new Error('plugins mismatch: ' + names);
+          const mgr = m.plugins.find(p => p.name === 'mobilework-expert-manager');
+          if (mgr.source?.repo !== 'xiaodong528/mobilework-expert-manager')
+            throw new Error('manager must reference xiaodong528/mobilework-expert-manager');
+          console.log('marketplace.json OK:', names.join(', '));
+          "
+
+      - name: Forbid vendored copies of the public manager skill
+        run: |
+          if [ -d skills/mobilework-expert-manager ] || \
+             find . -path ./.git -prune -o -type d -name 'mobilework-expert-manager' -print | grep -q .; then
+            echo 'ERROR: 仓库不得复制/内嵌公共 mobilework-expert-manager skill'
+            exit 1
+          fi
+          echo 'no vendored manager copies'
+
+      - name: Install Claude Code
+        run: npm install --global @anthropic-ai/claude-code@2.1.218
+
+      - name: Validate group plugin
+        run: claude plugin validate ./plugins/group-b-expert-eval --strict
+
+  plugin-scripts:
+    name: Plugin script tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Smoke test new_case.py
+        run: |
+          python plugins/group-b-expert-eval/skills/group-b-expert-eval/scripts/new_case.py \
+            --cases-dir /tmp/cases --object demo-expert --id demo-case \
+            --title "CI smoke case" --type structured
+          test -f /tmp/cases/demo-expert/demo-case.json && echo "new_case.py OK"
