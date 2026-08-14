@@ -86,7 +86,9 @@ def resolve_key() -> str:
         if p.exists():
             try:
                 d = json.loads(p.read_text())
-                k = (d.get("deepseek") or {}).get("api_key") or d.get("api_key")
+                k = ((d.get("deepseek") or {}).get("key")
+                     or (d.get("deepseek") or {}).get("api_key")
+                     or d.get("api_key"))
                 if k:
                     return k
             except Exception:
@@ -225,6 +227,11 @@ def score_promptfoo(run_dir: Path, case: str, key: str, env: dict,
     cfg = run_dir / "promptfooconfig.yaml"
     text = tpl.read_text()
     old_dir = str(tpl.parent)
+    # 先扫描模板引用的本目录资产（如 wordcount_assert.py）并复制过来，再改路径
+    for m in re.finditer(re.escape(old_dir) + r"/([\w.\-]+)", text):
+        asset = tpl.parent / m.group(1)
+        if asset.is_file() and not (run_dir / asset.name).exists():
+            shutil.copy2(asset, run_dir / asset.name)
     text = text.replace(old_dir, str(run_dir))  # exec sut-output.sh / file:// 断言路径
     # 注入当前凭证（归档模板里的 key 可能已轮换）
     text = re.sub(r"apiKey: sk-[A-Za-z0-9]+", f"apiKey: {key}", text)
@@ -235,10 +242,17 @@ def score_promptfoo(run_dir: Path, case: str, key: str, env: dict,
     cp = subprocess.run(
         ["promptfoo", "eval", "-c", str(cfg), "-o", str(run_dir / "promptfoo-results.json")],
         capture_output=True, text=True, env=env, cwd=str(run_dir), timeout=900)
-    if cp.returncode != 0:
+    rf = run_dir / "promptfoo-results.json"
+    if cp.returncode != 0 and not rf.exists():
         print("  !! promptfoo 失败：" + (cp.stderr or cp.stdout)[-400:], file=sys.stderr)
         return None
-    data = json.loads((run_dir / "promptfoo-results.json").read_text())
+    if cp.returncode != 0:
+        print("  注意：promptfoo 退出码非 0（常见 telemetry 超时），结果文件已生成，继续解析")
+    try:
+        data = json.loads(rf.read_text())
+    except Exception as exc:
+        print(f"  !! 结果文件不可解析：{exc}", file=sys.stderr)
+        return None
     entries = data["results"]["results"] if isinstance(data["results"], dict) else data["results"]
     assertions, n_pass = [], 0
     for e in entries:
@@ -328,6 +342,33 @@ def write_meta(run_dir: Path, case: str, spec: dict, model: str, kind: str,
     ok(f"meta.json（verdict={verdict}）")
 
 
+def rescore(args, spec: dict) -> int:
+    """对已有 run 目录重跑评分：保留原 meta 的会话/过程证据，仅重写 scoring。"""
+    run_dir = args.rescore_dir
+    meta_p = run_dir / "meta.json"
+    if not meta_p.exists():
+        fail(f"--rescore-dir 需要 {run_dir}/meta.json")
+    old = json.loads(meta_p.read_text())
+    deliverable = old.get("deliverable")
+    if not deliverable or not (run_dir / deliverable).exists():
+        fail("原 meta 无 deliverable 或文件缺失")
+    key = resolve_key()
+    if not key:
+        fail("未找到 DeepSeek key")
+    env = dict(os.environ, PATH=NODE_BIN + os.pathsep + os.environ.get("PATH", ""))
+    scoring = score_promptfoo(run_dir, args.case, key, env, deliverable)
+    if scoring is None:
+        fail("重评失败（见上方日志）")
+    old["scoring"] = scoring
+    old["verdict"] = ("pass" if all(a["pass"] for a in scoring["assertions"])
+                      else "fail") if scoring["assertions"] else old["verdict"]
+    old["human_notes"] = (old.get("human_notes") or "") + \
+        f" | {datetime.now().strftime('%Y-%m-%d')} run_case.py --rescore 重评（断言自动转录）。"
+    meta_p.write_text(json.dumps(old, ensure_ascii=False, indent=2))
+    ok(f"rescore 完成（verdict={old['verdict']}）")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--case", required=True, choices=sorted(CASES))
@@ -340,6 +381,8 @@ def main() -> int:
     ap.add_argument("--score-only", action="store_true",
                     help="不跑 opencode，只对 --deliverable 评分")
     ap.add_argument("--deliverable", help="评分用交付物路径（score-only 必填）")
+    ap.add_argument("--rescore-dir", type=Path,
+                    help="对已有 run 目录重新评分（保留原会话证据，重写 scoring）")
     ap.add_argument("--notes", default="", help="附加 human_notes")
     args = ap.parse_args()
 
@@ -348,6 +391,9 @@ def main() -> int:
         datetime.now().astimezone().strftime("%Y-%m-%d"))
     spec["deliverable"] = spec["deliverable"].replace("{date}",
         datetime.now().astimezone().strftime("%Y-%m-%d"))
+
+    if args.rescore_dir:
+        return rescore(args, spec)
 
     run_dir = args.eval_root / "results" / (
         f"{args.case}-{args.label}" if args.label else args.case)
