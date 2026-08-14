@@ -47,10 +47,10 @@ claude plugin details group-b-expert-eval@mobilework-expert-eval-group-b
    https://github.com/xiaodong528/mobilework-expert-manager/tree/917a200804cf56ccf67e1c405b22caf710d78eb1
    ```
 
-2. 本组插件（release tag `v0.1.0` 的子目录）：
+2. 本组插件（release tag `v0.2.0` 的子目录）：
 
    ```text
-   https://github.com/peirongli/mobilework-expert-eval-group-b-marketplace/tree/v0.1.0/plugins/group-b-expert-eval
+   https://github.com/peirongli/mobilework-expert-eval-group-b-marketplace/tree/v0.2.0/plugins/group-b-expert-eval
    ```
 
 Preview 需核对：owner/repo、ref、`plugins/group-b-expert-eval` 子目录、组件清单与 warning。
