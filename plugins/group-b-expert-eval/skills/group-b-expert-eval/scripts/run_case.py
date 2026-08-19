@@ -39,6 +39,8 @@ NODE_BIN = "/Users/lipeirong/.workbuddy/binaries/node/versions/22.22.2/bin"
 # 各 case 注册表：sut(name,type,version,commit) / ws / agent / prompt / deliverable
 SUT_TD = ("tech-digest-team", "专家团", "1.0.0", "0da0eee")
 SUT_CR = ("code-review-expert", "单专家", "1.0.0", "f7386f1")
+SUT_TD_OPT = ("tech-digest-team-opt", "专家团", "1.1.0", "opt")
+SUT_CR_OPT = ("code-review-expert-opt", "单专家", "1.1.0", "opt")
 D = "{date}"
 CASES = {
     "td-01": dict(sut=SUT_TD, ws="runs/ws-tech-digest", agent="chief-editor",
@@ -116,14 +118,22 @@ def preflight(eval_root: Path, case: str, spec: dict, need_run: bool) -> dict:
     pkg = eval_root / "packages" / spec["sut"][0]
     if not pkg.is_dir():
         fail(f"被测包不存在：{pkg}")
-    tag = f"v{spec['sut'][2]}"
-    r1 = subprocess.run(["git", "-C", str(pkg), "status", "--porcelain"],
-                        capture_output=True, text=True)
-    r2 = subprocess.run(["git", "-C", str(pkg), "diff", tag, "--stat"],
-                        capture_output=True, text=True)
-    if r1.stdout.strip() or r2.stdout.strip():
-        fail(f"被测包只读门破坏：{spec['sut'][0]} 相对 {tag} 有改动或工作区脏")
-    ok(f"被测包 {spec['sut'][0]}@{tag} 只读门（diff 为空）")
+    is_opt = spec["sut"][0].endswith("-opt")
+    if is_opt:
+        # opt 包：刚生成未 commit/tag，检查 expert.json 存在 + git init 已做
+        if not (pkg / "expert.json").exists():
+            fail(f"opt 包 expert.json 不存在：{pkg}")
+        ok(f"opt 包 {spec['sut'][0]} expert.json 存在（未 commit/tag，允许）")
+    else:
+        # 原包：git status 空 + diff v<tag> 空
+        tag = f"v{spec['sut'][2]}"
+        r1 = subprocess.run(["git", "-C", str(pkg), "status", "--porcelain"],
+                            capture_output=True, text=True)
+        r2 = subprocess.run(["git", "-C", str(pkg), "diff", tag, "--stat"],
+                            capture_output=True, text=True)
+        if r1.stdout.strip() or r2.stdout.strip():
+            fail(f"被测包只读门破坏：{spec['sut'][0]} 相对 {tag} 有改动或工作区脏")
+        ok(f"被测包 {spec['sut'][0]}@{tag} 只读门（diff 为空）")
 
     key = resolve_key()
     if not key:
@@ -294,7 +304,8 @@ def score_seeded_match(run_dir: Path, case: str, deliverable: str) -> dict | Non
 
 def write_meta(run_dir: Path, case: str, spec: dict, model: str, kind: str,
                deliverable: str, sessions: dict, runinfo: dict,
-               scoring: dict | None, extra_notes: str) -> None:
+               scoring: dict | None, extra_notes: str,
+               variant: str = "baseline") -> None:
     verdict = "blocked"
     if scoring and scoring["assertions"]:
         verdict = "pass" if all(a["pass"] for a in scoring["assertions"]) else "fail"
@@ -322,7 +333,7 @@ def write_meta(run_dir: Path, case: str, spec: dict, model: str, kind: str,
         "run_kind": kind,
         "sut": {"name": spec["sut"][0], "type": spec["sut"][1],
                 "version": spec["sut"][2], "commit": spec["sut"][3],
-                "variant": "baseline"},
+                "variant": variant},
         "host": "OpenCode CLI（opencode run --auto，经 group-b-expert-eval run_case.py）",
         "model": model,
         "input": spec["prompt"],
@@ -384,9 +395,20 @@ def main() -> int:
     ap.add_argument("--rescore-dir", type=Path,
                     help="对已有 run 目录重新评分（保留原会话证据，重写 scoring）")
     ap.add_argument("--notes", default="", help="附加 human_notes")
+    ap.add_argument("--variant", choices=["baseline", "optimized"],
+                    default="baseline",
+                    help="baseline=原包 v1.0.0, optimized=优化副本 v1.1.0")
     args = ap.parse_args()
 
     spec = CASES[args.case]
+    if args.variant == "optimized":
+        # 替换 SUT 和 ws 为 opt 版本
+        if spec["sut"] == SUT_TD:
+            spec["sut"] = SUT_TD_OPT
+            spec["ws"] = "runs/ws-tech-digest-opt"
+        elif spec["sut"] == SUT_CR:
+            spec["sut"] = SUT_CR_OPT
+            spec["ws"] = "runs/ws-code-review-opt"
     spec["prompt"] = spec["prompt"].replace("{date}",
         datetime.now().astimezone().strftime("%Y-%m-%d"))
     spec["deliverable"] = spec["deliverable"].replace("{date}",
@@ -395,8 +417,12 @@ def main() -> int:
     if args.rescore_dir:
         return rescore(args, spec)
 
+    # optimized 变体自动加 opt 前缀到 label，避免覆盖基线 run 目录
+    run_label = args.label
+    if args.variant == "optimized":
+        run_label = f"opt-{args.label}" if args.label else "opt"
     run_dir = args.eval_root / "results" / (
-        f"{args.case}-{args.label}" if args.label else args.case)
+        f"{args.case}-{run_label}" if run_label else args.case)
     if run_dir.exists():
         fail(f"run 目录已存在：{run_dir}（用 --label 区分）")
     run_dir.mkdir(parents=True)
@@ -415,7 +441,8 @@ def main() -> int:
             scoring = score_seeded_match(run_dir, args.case, deliverable)
         write_meta(run_dir, args.case, spec, args.model, args.run_kind,
                    deliverable, sessions, runinfo, scoring,
-                   "score-only：无会话回采。" + args.notes)
+                   "score-only：无会话回采。" + args.notes,
+                   variant=args.variant)
     else:
         runinfo = run_opencode(spec, ctx, args.model, run_dir, args.timeout)
         sessions = harvest_sessions(ctx["ws"], runinfo["start_ms"])
@@ -425,7 +452,8 @@ def main() -> int:
         if scoring is None:
             scoring = score_seeded_match(run_dir, args.case, deliverable)
         write_meta(run_dir, args.case, spec, args.model, args.run_kind,
-                   deliverable, sessions, runinfo, scoring, args.notes)
+                   deliverable, sessions, runinfo, scoring, args.notes,
+                   variant=args.variant)
 
     print(f"== 校验 schema ==")
     cp = subprocess.run([sys.executable,
