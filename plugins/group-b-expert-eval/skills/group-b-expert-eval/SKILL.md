@@ -32,18 +32,33 @@ mobilework-expert-manager 优化副本 → 同条件复测。
 
    用法：
    ```
-   python run_case.py --case td-01 --run-kind pilot            # 全流程
-   python run_case.py --case td-01 --label run2                # 同 case 多次运行
+   python run_case.py --case td-01 --run-kind pilot            # 全流程（基线）
+   python run_case.py --case td-01 --variant optimized          # 优化副本复测
+   python run_case.py --case td-01 --label run2                 # 同 case 多次运行
    python run_case.py --case td-01 --score-only --deliverable <path>
    python run_case.py --case td-01 --run-kind control-model --model deepseek/deepseek-v4-flash
    ```
 
+   `--variant`（2026-08-19 起）：`baseline`（默认，原包 v1.0.0）或 `optimized`（副本 v1.1.0，TD 系列自动打 F3 overlay）。
+   opt 包跳过 git 只读门（改为检查 expert.json 存在）；run 目录自动加 `-opt` 前缀。
+
    已注册 case：td-01~04（tech-digest-team）、cr-01~04（code-review-expert）。
 
+3. `batch_run.py`（2026-08-19 起，`eval/scripts/`）：80 次正式批量编排。
+   循环 8 case × 2 variant × 5 次，`run_kind=formal`，异常自动补跑（`--max-retries`），
+   超时 1800s/次，跑完自动 `diagnose --diff baseline vs optimized`。
+   ```
+   python eval/scripts/batch_run.py                           # 跑全部 80 次
+   python eval/scripts/batch_run.py --cases td-01,cr-04       # 只跑指定 case
+   python eval/scripts/batch_run.py --dry-run                  # 只打印计划
+   python eval/scripts/batch_run.py --resume                   # 跳过已完成的 run 目录
+   ```
+
 尚未覆盖（诚实声明）：
-- 优化副本生成仍由人调用公共 mobilework-expert-manager 完成，本插件负责
-  发起复测与证据落盘（第 6 周接入）。
-- 80 次 formal 统计的批量编排（当前逐次发起，`--label` 区分）。
+- 优化副本**生成**仍由人调用公共 mobilework-expert-manager 完成（create_expert.py），
+  本插件负责发起**复测**与证据落盘（`--variant optimized` 已脚本化，第 6 周验证）。
+- CR-01/02 的 F1 评分含人工裁决环节（finding↔EXPECTED 匹配）：
+  run_case.py 自动生成 `score-match-draft.json` 草稿，人工复核后写 `score-final.json`。
 - 本地结果 Web 重建需在 eval 工作区手动执行 `eval/web/build.py`。
 
 ## 使用约定
