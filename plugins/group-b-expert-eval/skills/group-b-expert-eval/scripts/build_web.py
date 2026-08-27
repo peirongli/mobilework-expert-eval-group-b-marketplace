@@ -43,9 +43,13 @@ WEB_DIR = EVAL_ROOT / "web"
 OUT = WEB_DIR / "index.html"
 DS = EVAL_ROOT.parent / "MobileWork-Design-System"
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+
 ASSETS = [
     (DS / "assets" / "china-mobile-logo.png", "china-mobile-logo.png"),
     (DS / "logos" / "favicon.ico", "favicon.ico"),
+    # Chart.js 本地 vendored（零 CDN、file:// 离线可用）
+    (SCRIPT_DIR / "assets" / "chart.umd.min.js", "chart.umd.min.js"),
 ]
 
 
@@ -335,6 +339,7 @@ TEMPLATE = r"""<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="icon" href="assets/favicon.ico">
+<script src="assets/chart.umd.min.js"></script>
 <title>__PAGE_TITLE__</title>
 <style>
 :root{
@@ -399,6 +404,18 @@ ul.clean li:last-child{border-bottom:0}
 .btn-accent:hover{filter:brightness(1.08)}
 .btn-ghost{background:var(--mw-surface);color:var(--mw-accent);border:1px solid var(--accent-border);border-radius:8px;padding:7px 14px;font-size:13px;font-weight:600;font-family:var(--font);cursor:pointer;min-height:34px}
 .fcount{font-size:12px;color:var(--mw-muted);margin-left:auto}
+.chart-grid{display:grid;grid-template-columns:320px 1fr;gap:12px;margin-bottom:20px}
+@media(max-width:760px){.chart-grid{grid-template-columns:1fr}}
+.chart-cell{background:var(--mw-surface);border:1px solid var(--mw-hairline);border-radius:8px;padding:14px}
+.chart-title{font-size:12px;color:var(--mw-muted);margin-bottom:8px;text-align:center}
+.heatwrap{overflow-x:auto;background:var(--mw-surface);border:1px solid var(--mw-hairline);border-radius:8px;padding:14px}
+table.heat{border-collapse:separate;border-spacing:3px;width:100%}
+table.heat th{font-size:11px;font-weight:600;background:none;padding:2px 6px}
+table.heat td.hcell{height:26px;min-width:34px;border-radius:5px;text-align:center;font-size:10px;font-weight:700;line-height:26px;padding:0}
+.hp{background:var(--accent-bg);color:var(--accent-strong);border:1px solid var(--accent-border)}
+.hf{background:var(--mw-ink);color:var(--mw-surface)}
+.hb{background:var(--mw-page);color:var(--mw-muted);border:1px dashed var(--mw-hairline)}
+.hn{background:transparent;border:1px dashed var(--mw-hairline)}
 </style>
 </head>
 <body>
@@ -413,9 +430,14 @@ ul.clean li:last-child{border-bottom:0}
 <main>
   <section class="view" id="v-overview">
     <div class="cards" id="statCards"></div>
+    <h2>核心指标</h2>
+    <div class="chart-grid">
+      <div class="chart-cell"><canvas id="chDonut" height="210"></canvas></div>
+      <div class="chart-cell"><canvas id="chByCase" height="210"></canvas></div>
+    </div>
+    <h2>80 次正式运行矩阵（行=case，列=5 次重复；绿=pass 黑=fail 灰=blocked/其他）</h2>
+    <div id="heatGrid"></div>
     <h2>被测对象（点击展开介绍）</h2><div id="sutList"></div>
-    <h2>运行分布（按被测对象）</h2><div id="distSut"></div>
-    <h2>运行分布（按模型 / 变体）</h2><div id="distModel"></div>
   </section>
   <section class="view" id="v-runs">
     <div class="filterbar">
@@ -453,9 +475,61 @@ VIEWS.forEach(([id,label],i)=>{const b=document.createElement("button");b.textCo
 $("#v-overview").classList.add("on");
 const st=DATA.stats;
 $("#statCards").innerHTML=[["正式运行",st.total],["通过率",st.pass_rate+"%"],["异常/发现",DATA.findings.length],["被测对象",Object.keys(st.by_sut).length]].map(([l,n])=>`<div class="card"><div class="num">${n}</div><div class="lbl">${l}</div></div>`).join("");
-const dist=o=>`<table><tr><th>项</th><th>次数</th></tr>${Object.entries(o).map(([k,v])=>`<tr><td>${esc(k)}</td><td>${v}</td></tr>`).join("")}</table>`;
-$("#distSut").innerHTML=dist(st.by_sut);
-$("#distModel").innerHTML=dist({...Object.fromEntries(Object.entries(st.by_model).map(([k,v])=>["模型: "+k,v])),...Object.fromEntries(Object.entries(st.by_variant).map(([k,v])=>["变体: "+k,v]))});
+
+/* ===== 总览图表（Chart.js 本地 vendored；缺失时优雅降级为表格） ===== */
+const VC={pass:getComputedStyle(document.documentElement).getPropertyValue('--mw-accent').trim()||'#1890ff',
+          fail:'#121314',blocked:'#7c8085'};
+const vcnt={pass:0,fail:0,other:0};
+DATA.runs.forEach(r=>{if(r.verdict==='pass')vcnt.pass++;else if(r.verdict==='fail')vcnt.fail++;else vcnt.other++});
+if(window.Chart){
+  Chart.defaults.font.family=getComputedStyle(document.body).fontFamily;
+  new Chart($("#chDonut"),{type:'doughnut',
+    data:{labels:['通过','未通过','其他状态'],datasets:[{data:[vcnt.pass,vcnt.fail,vcnt.other],
+      backgroundColor:[VC.pass,VC.fail,VC.blocked],borderWidth:2,borderColor:'#ffffff'}]},
+    options:{plugins:{legend:{position:'bottom',labels:{boxWidth:12,font:{size:11}}},
+      title:{display:true,text:`全部运行 verdict 分布 (N=${DATA.runs.length})`,font:{size:12}}},cutout:'58%'}});
+
+  // 按 case 的 baseline vs optimized 通过率分组柱状
+  const byCase={};
+  DATA.runs.forEach(r=>{
+    const m=String(r.case_id||r._dir).match(/^(case-\d+|td-\d+|cr-\d+)/);if(!m)return;
+    const base=m[1];byCase[base]=byCase[base]||{};
+    const v=r.sut?.variant||'baseline';if(v!=='baseline'&&v!=='optimized')return;
+    byCase[base][v]=byCase[base][v]||{p:0,t:0};byCase[base][v].t++;
+    if(r.verdict==='pass')byCase[base][v].p++;
+  });
+  const keys=Object.keys(byCase).sort();
+  new Chart($("#chByCase"),{type:'bar',
+    data:{labels:keys,datasets:[
+      {label:'原包 pass%',data:keys.map(k=>byCase[k].baseline?Math.round(100*byCase[k].baseline.p/byCase[k].baseline.t):null),
+       backgroundColor:VC.pass,borderRadius:4},
+      {label:'优化副本 pass%',data:keys.map(k=>byCase[k].optimized?Math.round(100*byCase[k].optimized.p/byCase[k].optimized.t):null),
+       backgroundColor:VC.blocked,borderRadius:4}]},
+    options:{scales:{y:{beginAtZero:true,max:100,title:{display:true,text:'断言/verdict 通过率 %',font:{size:11}}}},
+      plugins:{legend:{position:'bottom',labels:{boxWidth:12,font:{size:11}}}},responsive:true}});
+
+  /* 矩阵热力格：行=case，列=5 次重复 ×2 变体 */
+  const heat={};
+  DATA.runs.forEach(r=>{
+    const m=String(r._dir||'').match(/^(case-\d+|td-\d+|cr-\d+)(-(opt))?-formal-r(\d+)/);
+    if(!m)return;
+    const base=m[1],variant=m[3]?'opt':'base';
+    const col=m[4];
+    heat[base]=heat[base]||{};heat[base][variant+col]={verdict:r.verdict,run:r._dir};
+  });
+  const hkeys=Object.keys(heat).sort();
+  const cell=v=>v==='pass'?['hp','✓']:v==='fail'?['hf','✗']:['hb','⚠'];
+  $("#heatGrid").innerHTML=`<div class="heatwrap"><table class="heat"><tr><th></th>${[1,2,3,4,5].map(i=>`<th colspan="2" style="text-align:center;border-left:1px solid var(--mw-hairline)">R${i}</th>`).join('')}</tr>
+    <tr><th></th>${[1,2,3,4,5].map(i=>'<th>基线</th><th>副本</th>').join('')}</tr>
+    ${hkeys.map(b=>`<tr><th style="text-align:left">${esc(b)}</th>${[1,2,3,4,5].map(i=>['base','opt'].map(v=>{
+      const d=(heat[b]&&heat[b][v+i])||null;
+      if(!d)return '<td class="hcell hn"></td>';
+      const [cls,ch]=cell(d.verdict);
+      return `<td class="hcell ${cls}" title="${esc(d.run)}">${ch}</td>`;
+    }).join('')).join('')}</tr>`).join('')}</table></div>`;
+}else{
+  $("#heatGrid").innerHTML='<div class="empty">chart.umd.min.js 未找到（assets 同步失败），图表降级。可用表格视图查看各 case 数据。</div>';
+}
 // 被测对象身份卡
 $("#sutList").innerHTML=DATA.objects.map(o=>{
   const members=(o.members||[]).map(m=>`<tr><td>${esc(m.name)}</td><td style="font-family:var(--mono);font-size:11px">${esc(m.id)}</td><td>${esc(m.profession||'')}</td><td class="reason">${esc(m.description||'')}</td></tr>`).join("");
@@ -480,10 +554,17 @@ const badgeVerdict=v=>v==='pass'?'<span class="badge b-pass">✓ 通过</span>':
 $("#findingList").innerHTML=`<table><tr><th>ID</th><th>严重度</th><th>标题</th><th>状态</th><th>详情</th></tr>${DATA.findings.map(f=>`<tr><td>${f.id}</td><td><span class="badge ${f.severity==='高'?'b-sev-high':f.severity==='中'?'b-sev-mid':'b-sev-low'}">${f.severity==='高'?'! ':f.severity==='中'?'● ':'○ '}${esc(f.severity)}</span></td><td>${esc(f.title)}</td><td>${esc(f.status)}</td><td class="reason">${esc(f.detail)}</td></tr>`).join("")}</table>`;
 const cmp=Object.entries(DATA.comparisons);
 const getRun=dir=>DATA.runs.find(r=>r["_dir"]===dir);
-$("#compareBox").innerHTML=cmp.length?cmp.map(([name,g])=>{
+$("#compareBox").innerHTML=cmp.length?(()=>{
+  let gUp=0,gDown=0,gSame=0;
+  const groupsHtml=cmp.map(([name,g])=>{
   const blRun=g.baseline?getRun(g.baseline.run):null, optRun=g.optimized?getRun(g.optimized.run):null;
   const blA=blRun?(blRun["_assertions"]||[]):[], optA=optRun?(optRun["_assertions"]||[]):[];
   const allDids=[...new Set([...blA.map(a=>a.desc),...optA.map(a=>a.desc)])];
+  let up=0,down=0,same=0;
+  allDids.forEach(d=>{const b=blA.find(a=>a.desc===d)?.pass,o=optA.find(a=>a.desc===d)?.pass;
+    if(b===false&&o===true)up++;else if(b===true&&o===false)down++;else if(b!==undefined&&o!==undefined)same++});
+  gUp+=up;gDown+=down;gSame+=same;
+  const sumBadge=(up||down||same)?`<span class="tag" style="margin-left:8px">↑提升 ${up}</span> <span class="tag" style="margin-left:4px">↓退化 ${down}</span> <span class="tag" style="margin-left:4px">不变 ${same}</span>`:'';
   const mainRows=["baseline","optimized"].filter(v=>g[v]).map(v=>{
     const run=v==='baseline'?blRun:optRun;
     const dur=run?.process?.duration_sec?Math.round(run.process.duration_sec)+'s':'—';
@@ -505,8 +586,15 @@ $("#compareBox").innerHTML=cmp.length?cmp.map(([name,g])=>{
     }
     return row;
   }).join(""):"";
-  return `<h2>${esc(name)} <span style="font-weight:400;color:var(--mw-muted);font-size:13px">${esc(CASE_INFO[name]||'')}</span></h2><table><tr><th>变体</th><th>版本</th><th>评分</th><th>结论</th><th>运行</th><th>耗时</th></tr>${mainRows}</table>${assertRows?`<table style="margin-top:4px"><tr><th>断言维度</th><th>基线</th><th>优化</th><th>变化</th></tr>${assertRows}</table>`:""}${blockedNote}${!g.optimized?'<div class="empty">优化副本尚未产生</div>':""}`;
-}).join(""):'<div class="empty">暂无数据</div>';
+  return `<h2>${esc(name)} <span style="font-weight:400;color:var(--mw-muted);font-size:13px">${esc(CASE_INFO[name]||'')}</span>${sumBadge}</h2><table><tr><th>变体</th><th>版本</th><th>评分</th><th>结论</th><th>运行</th><th>耗时</th></tr>${mainRows}</table>${assertRows?`<table style="margin-top:4px"><tr><th>断言维度</th><th>基线</th><th>优化</th><th>变化</th></tr>${assertRows}</table>`:""}${blockedNote}${!g.optimized?'<div class="empty">优化副本尚未产生</div>':""}`;
+  }).join('');
+  const verdict=gUp-gDown>=0?'b-pass':'b-fail';
+  const summary=`<div class="card" style="display:flex;gap:20px;align-items:center;flex-wrap:wrap;margin-bottom:16px">
+    <span style="font-weight:600;font-size:13px">全局净效果（${cmp.length} 个 case 断言汇总）</span>
+    <span class="badge ${verdict}">↑ 提升 ${gUp}</span><span class="badge b-fail">↓ 退化 ${gDown}</span>
+    <span class="badge b-sev-low">不变 ${gSame}</span></div>`;
+  return summary+groupsHtml;
+})():'<div class="empty">暂无数据</div>';
 const adv=DATA.advice||[];
 const stB=s=>s==='applied'?'b-pass':s==='rejected'?'b-fail':'b-sev-mid';
 const stI=s=>s==='applied'?'✓ ':s==='rejected'?'✗ ':'● ';
@@ -572,7 +660,7 @@ function renderRuns(filtered){
       <div class="kv"><b>终审</b>　${esc(r.process?.final_review||'')}</div>
       <div class="kv"><b>权限决策证据</b>　${esc(r.process?.permission_evidence||'')}</div>
       ${asserts?`<h2>Promptfoo 评分（${r._assertions.filter(a=>a.pass).length}/${r._assertions.length}）</h2><table><tr><th></th><th>维度</th><th>类型</th><th>评分理由</th></tr>${asserts}</table>`:""}
-      ${r._deliverable_text?`<h2>交付物（${esc(r.deliverable)}）</h2><pre>${esc(r._deliverable_text)}</pre>`:""}
+      ${r._deliverable_text?`<details style="margin:8px 0"><summary class="btn-ghost" style="display:inline-block;list-style:none;cursor:pointer">📄 查看交付物全文（${esc(r.deliverable)}）</summary><pre style="margin-top:6px">${esc(r._deliverable_text)}</pre></details>`:""}
       ${anom?`<div class="kv"><b>关联异常</b>　${anom}</div>`:""}
       ${r.human_notes?`<div class="kv"><b>备注</b>　${esc(r.human_notes)}</div>`:""}
     </div></div>`}).join(""):'<div class="empty">没有符合筛选条件的运行</div>';
