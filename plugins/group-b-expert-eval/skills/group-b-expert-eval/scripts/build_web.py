@@ -404,6 +404,9 @@ ul.clean li:last-child{border-bottom:0}
 .btn-accent:hover{filter:brightness(1.08)}
 .btn-ghost{background:var(--mw-surface);color:var(--mw-accent);border:1px solid var(--accent-border);border-radius:8px;padding:7px 14px;font-size:13px;font-weight:600;font-family:var(--font);cursor:pointer;min-height:34px}
 .fcount{font-size:12px;color:var(--mw-muted);margin-left:auto}
+tr.trow{cursor:pointer}
+tr.trow:hover td{background:var(--accent-bg-hover)}
+tr.trdetail>td{background:var(--mw-page)}
 .chart-grid{display:grid;grid-template-columns:320px 1fr;gap:12px;margin-bottom:20px}
 @media(max-width:760px){.chart-grid{grid-template-columns:1fr}}
 .chart-cell{background:var(--mw-surface);border:1px solid var(--mw-hairline);border-radius:8px;padding:14px}
@@ -441,6 +444,8 @@ table.heat td.hcell{height:26px;min-width:34px;border-radius:5px;text-align:cent
   </section>
   <section class="view" id="v-runs">
     <div class="filterbar">
+      <button class="btn-accent" id="modeCard" onclick="setRunMode('card')">卡片</button>
+      <button class="btn-ghost" id="modeTable" onclick="setRunMode('table')">表格</button>
       <input type="text" id="fText" placeholder="搜索标题 / case / 对象 / 模型…">
       <select id="fCase"><option value="">全部 case</option></select>
       <select id="fVariant"><option value="">全部变体</option><option value="baseline">baseline</option><option value="optimized">optimized</option><option value="__group_control">对照臂</option></select>
@@ -451,6 +456,12 @@ table.heat td.hcell{height:26px;min-width:34px;border-radius:5px;text-align:cent
   </section>
   <section class="view" id="v-findings"><div id="findingList"></div></section>
   <section class="view" id="v-compare">
+    <div id="cmpSummary"></div>
+    <h2>优化净效果与耗时对比</h2>
+    <div class="chart-grid">
+      <div class="chart-cell"><canvas id="chDelta" height="210"></canvas></div>
+      <div class="chart-cell"><canvas id="chDur" height="210"></canvas></div>
+    </div>
     <h2>优化前后对比（自动配对）</h2><div id="compareBox"></div>
     <h2>自由配对对比</h2>
     <div class="pairbar">
@@ -489,15 +500,21 @@ if(window.Chart){
     options:{plugins:{legend:{position:'bottom',labels:{boxWidth:12,font:{size:11}}},
       title:{display:true,text:`全部运行 verdict 分布 (N=${DATA.runs.length})`,font:{size:12}}},cutout:'58%'}});
 
-  // 按 case 的 baseline vs optimized 通过率分组柱状
-  const byCase={};
+  // 按 case 聚合（共享给对比 tab 图表）：baseline/optimized 通过率 + 平均耗时
+  window.AGG={};
   DATA.runs.forEach(r=>{
     const m=String(r.case_id||r._dir).match(/^(case-\d+|td-\d+|cr-\d+)/);if(!m)return;
-    const base=m[1];byCase[base]=byCase[base]||{};
-    const v=r.sut?.variant||'baseline';if(v!=='baseline'&&v!=='optimized')return;
-    byCase[base][v]=byCase[base][v]||{p:0,t:0};byCase[base][v].t++;
-    if(r.verdict==='pass')byCase[base][v].p++;
+    const base=m[1];window.AGG[base]=window.AGG[base]||{};
+    const v=r.sut?.variant||'baseline';
+    if(v==='baseline'||v==='optimized'){
+      window.AGG[base][v]=window.AGG[base][v]||{p:0,t:0,durSum:0,durN:0};
+      const g=window.AGG[base][v];g.t++;
+      if(r.verdict==='pass')g.p++;
+      const d=Number(r.process?.duration_sec);
+      if(d>0){g.durSum+=d;g.durN++;}
+    }
   });
+  const byCase=window.AGG;
   const keys=Object.keys(byCase).sort();
   new Chart($("#chByCase"),{type:'bar',
     data:{labels:keys,datasets:[
@@ -589,12 +606,37 @@ $("#compareBox").innerHTML=cmp.length?(()=>{
   return `<h2>${esc(name)} <span style="font-weight:400;color:var(--mw-muted);font-size:13px">${esc(CASE_INFO[name]||'')}</span>${sumBadge}</h2><table><tr><th>变体</th><th>版本</th><th>评分</th><th>结论</th><th>运行</th><th>耗时</th></tr>${mainRows}</table>${assertRows?`<table style="margin-top:4px"><tr><th>断言维度</th><th>基线</th><th>优化</th><th>变化</th></tr>${assertRows}</table>`:""}${blockedNote}${!g.optimized?'<div class="empty">优化副本尚未产生</div>':""}`;
   }).join('');
   const verdict=gUp-gDown>=0?'b-pass':'b-fail';
-  const summary=`<div class="card" style="display:flex;gap:20px;align-items:center;flex-wrap:wrap;margin-bottom:16px">
+  $("#cmpSummary").innerHTML=`<div class="card" style="display:flex;gap:20px;align-items:center;flex-wrap:wrap;margin-bottom:4px">
     <span style="font-weight:600;font-size:13px">全局净效果（${cmp.length} 个 case 断言汇总）</span>
     <span class="badge ${verdict}">↑ 提升 ${gUp}</span><span class="badge b-fail">↓ 退化 ${gDown}</span>
     <span class="badge b-sev-low">不变 ${gSame}</span></div>`;
-  return summary+groupsHtml;
+  return groupsHtml;
 })():'<div class="empty">暂无数据</div>';
+
+/* ===== 对比 tab 两张聚合图（Δ 通过率正负柱 + 耗时成对柱） ===== */
+if(window.Chart){
+  const agg=window.AGG||{};
+  const keys=Object.keys(agg).sort();
+  const delta=keys.map(k=>{
+    const b=agg[k].baseline,o=agg[k].optimized;
+    if(!b||!o)return null;
+    return Math.round(100*(o.p/o.t - b.p/b.t));
+  });
+  new Chart($("#chDelta"),{type:'bar',
+    data:{labels:keys,datasets:[{label:'优化副本 − 原包 (百分点)',
+      data:delta,backgroundColor:delta.map(v=>v>=0?VC.pass:VC.fail),borderRadius:3}]},
+    options:{plugins:{legend:{display:false},title:{display:true,text:'通过率变化 Δ(副本−基线)',font:{size:12}}},
+      scales:{y:{title:{display:true,text:'百分点',font:{size:11}}}}}});
+  const hasDur=keys.filter(k=>agg[k].baseline?.durN&&agg[k].optimized?.durN);
+  new Chart($("#chDur"),{type:'bar',
+    data:{labels:hasDur,datasets:[
+      {label:'原包 平均耗时(s)',data:hasDur.map(k=>Math.round(agg[k].baseline.durSum/agg[k].baseline.durN)),
+       backgroundColor:VC.pass,borderRadius:3},
+      {label:'副本 平均耗时(s)',data:hasDur.map(k=>Math.round(agg[k].optimized.durSum/agg[k].optimized.durN)),
+       backgroundColor:VC.blocked,borderRadius:3}]},
+    options:{plugins:{legend:{position:'bottom',labels:{boxWidth:12,font:{size:11}}}},
+      scales:{y:{beginAtZero:true,title:{display:true,text:'秒',font:{size:11}}}}}});
+}
 const adv=DATA.advice||[];
 const stB=s=>s==='applied'?'b-pass':s==='rejected'?'b-fail':'b-sev-mid';
 const stI=s=>s==='applied'?'✓ ':s==='rejected'?'✗ ':'● ';
@@ -642,29 +684,58 @@ function renderNotesTable(){
   if(formStart>=0)$("#notesBox").innerHTML=t+$("#notesBox").innerHTML.slice(formStart);
 }
 
-/* ===== 运行记录筛选 ===== */
+/* ===== 运行记录筛选 + 卡片/表格双模式 ===== */
 const baseCase=s=>(String(s).match(/^(case-\d+|td-\d+|cr-\d+)/)||[''])[0];
 const allRuns=DATA.runs;
+let runMode='card';
+let runDetailBody=null; // 卡片详情渲染函数（每条 run 展开后的 HTML）
+runDetailBody=r=>{
+  const asserts=r._assertions.map(a=>`<tr><td>${badgePass(a.pass)}</td><td>${esc(a.desc)}</td><td>${esc(a.type)}</td><td class="reason">${esc(a.reason)}</td></tr>`).join("");
+  const dels=(r.process?.delegations||[]).map(d=>`<tr><td>${esc(d.stage)}</td><td>${esc(d.agent)}</td><td style="font-family:var(--mono);font-size:11px">${esc(d.session)}</td><td>${esc(d.acceptance)}</td></tr>`).join("");
+  const anom=(r.anomalies||[]).map(id=>{const f=DATA.findings.find(x=>x.id===id);return f?`<span class="badge b-sev-mid">${f.id} ${esc(f.title)}</span>`:id}).join(" ");
+  return `
+    <div class="kv"><b>输入</b>　${esc(r.input)}</div>
+    <div class="kv"><b>宿主</b>　${esc(r.host)} ｜ <b>声明自主度</b>　${esc(r.process?.autonomy_declared||'')} ｜ <b>返工</b>　${r.process?.rework_count??'—'}</div>
+    ${dels?`<h2>委派关系与验收</h2><table><tr><th>阶段</th><th>执行者</th><th>子会话</th><th>验收</th></tr>${dels}</table>`:""}
+    <div class="kv"><b>终审</b>　${esc(r.process?.final_review||'')}</div>
+    <div class="kv"><b>权限决策证据</b>　${esc(r.process?.permission_evidence||'')}</div>
+    ${asserts?`<h2>Promptfoo 评分（${r._assertions.filter(a=>a.pass).length}/${r._assertions.length}）</h2><table><tr><th></th><th>维度</th><th>类型</th><th>评分理由</th></tr>${asserts}</table>`:""}
+    ${r._deliverable_text?`<details style="margin:8px 0"><summary class="btn-ghost" style="display:inline-block;list-style:none;cursor:pointer">📄 查看交付物全文（${esc(r.deliverable)}）</summary><pre style="margin-top:6px">${esc(r._deliverable_text)}</pre></details>`:""}
+    ${anom?`<div class="kv"><b>关联异常</b>　${anom}</div>`:""}
+    ${r.human_notes?`<div class="kv"><b>备注</b>　${esc(r.human_notes)}</div>`:""}`;
+};
 function renderRuns(filtered){
-  $("#runList").innerHTML=filtered.length?filtered.map(r=>{
-    const asserts=r._assertions.map(a=>`<tr><td>${badgePass(a.pass)}</td><td>${esc(a.desc)}</td><td>${esc(a.type)}</td><td class="reason">${esc(a.reason)}</td></tr>`).join("");
-    const dels=(r.process?.delegations||[]).map(d=>`<tr><td>${esc(d.stage)}</td><td>${esc(d.agent)}</td><td style="font-family:var(--mono);font-size:11px">${esc(d.session)}</td><td>${esc(d.acceptance)}</td></tr>`).join("");
-    const anom=(r.anomalies||[]).map(id=>{const f=DATA.findings.find(x=>x.id===id);return f?`<span class="badge b-sev-mid">${f.id} ${esc(f.title)}</span>`:id}).join(" ");
-    return `<div class="run"><div class="run-head" onclick="this.parentNode.classList.toggle('open')">
-      ${badgePass(r.verdict==='pass')}
-      <span class="t">${esc(r.title)}</span><span class="meta">${esc(r.case_id)} · ${esc(r.date)} · ${esc(r.sut.name)}@${esc(r.sut.commit||'')} · ${esc(r.model)}</span></div>
-    <div class="run-body">
-      <div class="kv"><b>输入</b>　${esc(r.input)}</div>
-      <div class="kv"><b>宿主</b>　${esc(r.host)} ｜ <b>声明自主度</b>　${esc(r.process?.autonomy_declared||'')} ｜ <b>返工</b>　${r.process?.rework_count??'—'}</div>
-      ${dels?`<h2>委派关系与验收</h2><table><tr><th>阶段</th><th>执行者</th><th>子会话</th><th>验收</th></tr>${dels}</table>`:""}
-      <div class="kv"><b>终审</b>　${esc(r.process?.final_review||'')}</div>
-      <div class="kv"><b>权限决策证据</b>　${esc(r.process?.permission_evidence||'')}</div>
-      ${asserts?`<h2>Promptfoo 评分（${r._assertions.filter(a=>a.pass).length}/${r._assertions.length}）</h2><table><tr><th></th><th>维度</th><th>类型</th><th>评分理由</th></tr>${asserts}</table>`:""}
-      ${r._deliverable_text?`<details style="margin:8px 0"><summary class="btn-ghost" style="display:inline-block;list-style:none;cursor:pointer">📄 查看交付物全文（${esc(r.deliverable)}）</summary><pre style="margin-top:6px">${esc(r._deliverable_text)}</pre></details>`:""}
-      ${anom?`<div class="kv"><b>关联异常</b>　${anom}</div>`:""}
-      ${r.human_notes?`<div class="kv"><b>备注</b>　${esc(r.human_notes)}</div>`:""}
-    </div></div>`}).join(""):'<div class="empty">没有符合筛选条件的运行</div>';
+  if(runMode==='card'){
+    $("#runList").innerHTML=filtered.length?filtered.map(r=>`
+      <div class="run"><div class="run-head" onclick="this.parentNode.classList.toggle('open')">
+        ${badgePass(r.verdict==='pass')}
+        <span class="t">${esc(r.title)}</span><span class="meta">${esc(r.case_id)} · ${esc(r.date)} · ${esc(r.sut.name)}@${esc(r.sut.commit||'')} · ${esc(r.model)}</span></div>
+      <div class="run-body">${runDetailBody(r)}</div></div>`).join(''):'<div class="empty">没有符合筛选条件的运行</div>';
+  }else{
+    const rows=filtered.map((r,i)=>{
+      const asrt=r._assertions,score=asrt.length?`${asrt.filter(a=>a.pass).length}/${asrt.length}`:'—';
+      const dur=r.process?.duration_sec>0?Math.round(r.process.duration_sec)+'s':'—';
+      const v=r.sut?.variant||'baseline';
+      return `<tr class="trow" onclick="toggleTRow(${i})">
+        <td>${badgeVerdict(r.verdict)}</td><td style="max-width:260px" class="reason">${esc(r.title)}</td>
+        <td>${esc(r.case_id)}</td><td><span class="tag">${esc(v)}</span></td>
+        <td class="reason">${esc(r.model.replace('deepseek/',''))}</td><td>${dur}</td><td>${score}</td></tr>
+      <tr class="trdetail" id="tdetail-${i}" style="display:none"><td colspan="7">${runDetailBody(r)}</td></tr>`;
+    }).join('');
+    $("#runList").innerHTML=filtered.length?`<table class="rtable"><tr><th>结论</th><th>标题</th><th>Case</th><th>变体</th><th>模型</th><th>耗时</th><th>得分</th></tr>${rows}</table>`:'<div class="empty">没有符合筛选条件的运行</div>';
+  }
+  window._shown=filtered;
   $("#fCount").textContent=`${filtered.length} / ${allRuns.length} 条`;
+}
+function toggleTRow(i){
+  const el=document.getElementById('tdetail-'+i);
+  el.style.display=el.style.display==='none'?'':'none';
+}
+function setRunMode(m){
+  runMode=m;
+  $("#modeCard").className=m==='card'?'btn-accent':'btn-ghost';
+  $("#modeTable").className=m==='table'?'btn-accent':'btn-ghost';
+  applyFilters();
 }
 function applyFilters(){
   const kw=$("#fText").value.trim().toLowerCase(), fc=$("#fCase").value,
