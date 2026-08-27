@@ -479,7 +479,7 @@ table.heat td.hcell{height:26px;min-width:34px;border-radius:5px;text-align:cent
 <script>
 /*__DATA__*/
 const $=s=>document.querySelector(s), esc=s=>String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
-const CASE_INFO={'td-01':'端侧大模型推理优化简报(结构化,600字)','td-02':'RAG评测方法技术周报(结构化,800字,四栏目)','td-03':'向量数据库选型调研(混合式,1500字,Milvus/Qdrant/pgvector)','td-04':'AI Agent记忆机制调研(开放式,1000字)','cr-01':'预埋Python代码评审(user_service.py,8个预埋问题)','cr-02':'预埋JS安全评审(auth.js,安全+性能)','cr-03':'真实代码可维护性评审(diagnose_expert.py)','cr-04':'开放多文件评审(mininote全套源码)','case-001':'第2周链路验证case(端侧推理优化简报)'};
+const CASE_INFO={'td-01':'端侧大模型推理优化简报(结构化,600字)','td-02':'RAG评测方法技术周报(结构化,800字,四栏目)','td-03':'向量数据库选型调研(混合式,1500字,Milvus/Qdrant/pgvector)','td-04':'AI Agent记忆机制调研(开放式,1000字)','cr-01':'预埋Python代码评审(user_service.py,8个预埋问题)','cr-02':'预埋JS安全评审(auth.js,安全+性能)','cr-03':'真实代码可维护性评审(diagnose_expert.py)','cr-04':'开放多文件评审(mininote全套源码)'};
 const VIEWS=[["v-overview","总览"],["v-runs","运行记录"],["v-findings","异常与发现"],["v-compare","优化前后对比"],["v-notes","人工建议"]];
 const nav=$("#nav");
 VIEWS.forEach(([id,label],i)=>{const b=document.createElement("button");b.textContent=label;b.onclick=()=>{VIEWS.forEach(([v])=>{$("#"+v).classList.remove("on")});nav.querySelectorAll("button").forEach(x=>x.classList.remove("on"));$("#"+id).classList.add("on");b.classList.add("on")};if(i===0)b.classList.add("on");nav.appendChild(b)});
