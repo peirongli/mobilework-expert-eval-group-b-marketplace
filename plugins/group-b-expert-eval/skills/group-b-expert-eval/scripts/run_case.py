@@ -317,7 +317,7 @@ def write_meta(run_dir: Path, case: str, spec: dict, model: str, kind: str,
         notes += f" 另有 {len(sessions['side'])} 个侧起主会话（见 opencode.db）。"
     if extra_notes:
         notes += " " + extra_notes
-    subs_ids = [s["id"] for s in sessions["subs"]]
+    subs_ids = [s["id"] for s in sessions["subs"]] if sessions else []
     process = {
         "delegations": build_delegations(sessions) if sessions else [],
         "rework_count": 0,
