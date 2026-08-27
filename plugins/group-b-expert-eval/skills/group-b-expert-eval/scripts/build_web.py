@@ -12,10 +12,16 @@ AI 自由定制模板：HTML/CSS/JS 模板即本文件内的 TEMPLATE 字符串�
 --title/--accent 提供免编辑的快速参数化。
 
 用法:
-  python build_web.py                          # 默认生成 <eval>/web/index.html
+  python build_web.py                          # 只生成 <eval>/web/index.html 后退出
   python build_web.py --accent "#0052d9"       # 换主题色
   python build_web.py --title "B 组评测报告"    # 换标题
-生成完成后打印 file:// URL，可直接粘贴到 OpenWork 内置浏览器打开。
+  python build_web.py --serve [--port 8763]     # 本地部署模式（G14 建议写回）
+
+安全边界（任务书 §3.2：Web 不是第二控制台）：
+  --serve 仅绑定 127.0.0.1，白名单路由只有 GET /(页面)、GET /api/data(只读)、
+  POST /api/advice(G14 建议追加)；无任何发起运行/exec 类端点。
+原始证据永不改写：POST 只允许追加进 advice.json（G14 建议宿主文件，
+非运行证据）；meta.json/promptfoo-results.json 等 evidence 无写路径。
 """
 import argparse
 import json
@@ -23,6 +29,9 @@ import os
 import re
 import shutil
 import sys
+import threading
+from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 EVAL_ROOT = Path(os.environ.get(
@@ -180,21 +189,49 @@ def load_advice():
     return advice
 
 
-def main():
-    ap = argparse.ArgumentParser(description="本地结果 Web 生成器（agent 可调起）")
-    ap.add_argument("--title", default="MobileWork 专家（团）评测结果 · B 组",
-                    help="页面标题（header h1 与 <title>）")
-    ap.add_argument("--accent", default="#1890ff",
-                    help="主题色 hex（如 #0052d9），驱动全套派生色")
-    args = ap.parse_args()
+ADVICE_PATH = RESULTS.parent / "records" / "advice.json"
+_ADVICE_LOCK = threading.Lock()
+MAX_BODY = 65536
 
-    sync_assets()
+
+def append_advice(entry: dict) -> dict:
+    """追加一条逐 case 人工建议（G14 数据流；append-only，不改已有条目）。"""
+    case_id = str(entry.get("case_id", "")).strip()[:64]
+    text = str(entry.get("advice", "")).strip()[:2000]
+    if not case_id or not text:
+        raise ValueError("case_id 与 advice 为必填")
+    with _ADVICE_LOCK:
+        advice = json.loads(ADVICE_PATH.read_text(encoding="utf-8")) \
+            if ADVICE_PATH.exists() else []
+        assert isinstance(advice, list)
+        ids = {a.get("id", "") for a in advice}
+        n = 1
+        while f"A-{n:03d}" in ids:
+            n += 1
+        rec = {
+            "id": f"A-{n:03d}",
+            "case_id": case_id,
+            "run_ref": str(entry.get("run_ref") or "") or None,
+            "advice": text,
+            "status": "open",
+            "draft": False,
+            "submitted_by": str(entry.get("submitted_by", "")).strip()[:32] or "页面提交",
+            "date": datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d"),
+            "linked_run": str(entry.get("linked_run") or "").strip()[:64] or None,
+            "source": "web-ui",
+        }
+        if entry.get("evidence"):
+            rec["evidence"] = str(entry["evidence"])[:500]
+        advice.append(rec)
+        ADVICE_PATH.write_text(
+            json.dumps(advice, ensure_ascii=False, indent=2), encoding="utf-8")
+    return rec
+
+
+def build_payload() -> dict:
     runs = load_runs()
-    if not runs:
-        print("!! eval/results/ 下没有含 meta.json 的运行记录", file=sys.stderr)
-        sys.exit(1)
-    payload = {
-        "generated_by": "group-b-expert-eval build_web.py（只读结果界面，无执行入口）",
+    return {
+        "generated_by": "group-b-expert-eval build_web.py（结果界面 + G14 建议写回，无执行入口）",
         "runs": runs,
         "findings": load_findings(),
         "objects": load_objects(runs),
@@ -202,16 +239,94 @@ def main():
         "comparisons": build_comparisons(runs),
         "advice": load_advice(),
     }
-    # 防御性 XSS 防护:把 < 替换为 \u003c(避免交付物里的 XSS 示例被 HTML 解析器误执行)
-    data_js = json.dumps(payload, ensure_ascii=False).replace("<", "\\u003c").replace("</", "<\\/")
+
+
+def write_page(payload: dict, title: str, accent: str) -> Path:
+    sync_assets()
+    data_js = json.dumps(payload, ensure_ascii=False) \
+        .replace("<", "\\u003c").replace("</", "<\\/")
     page = (TEMPLATE
             .replace("/*__DATA__*/", f"const DATA = {data_js};")
-            .replace("__PAGE_TITLE__", args.title)
-            .replace("__ACCENT__", args.accent))
+            .replace("__PAGE_TITLE__", title)
+            .replace("__ACCENT__", accent))
     OUT.parent.mkdir(parents=True, exist_ok=True)
     OUT.write_text(page, encoding="utf-8")
-    print(f"OK -> {OUT}  (runs={len(runs)}, findings={len(payload['findings'])})")
-    print(f"在 OpenWork 内置浏览器或本机浏览器打开:\n  file://{OUT}")
+    return OUT
+
+
+def main():
+    ap = argparse.ArgumentParser(description="本地结果 Web 生成器（agent 可调起）")
+    ap.add_argument("--title", default="MobileWork 专家（团）评测结果 · B 组",
+                    help="页面标题（header h1 与 <title>）")
+    ap.add_argument("--accent", default="#1890ff",
+                    help="主题色 hex（如 #0052d9），驱动全套派生色")
+    ap.add_argument("--serve", action="store_true",
+                    help="本地部署模式：生成页面并起 127.0.0.1 server"
+                         "（白名单 POST /api/advice 支持页面上提交 G14 建议）")
+    ap.add_argument("--port", type=int, default=8763, help="--serve 模式端口")
+    args = ap.parse_args()
+
+    payload = build_payload()
+    if not payload["runs"]:
+        print("!! eval/results/ 下没有含 meta.json 的运行记录", file=sys.stderr)
+        sys.exit(1)
+    out = write_page(payload, args.title, args.accent)
+    print(f"OK -> {out}  (runs={len(payload['runs'])}, "
+          f"findings={len(payload['findings'])})")
+
+    if not args.serve:
+        print(f"在 OpenWork 内置浏览器或本机浏览器打开:\n  file://{out}")
+        return
+
+    class Handler(BaseHTTPRequestHandler):
+        server_version = "MobileWorkEvalWeb/1.0"
+
+        def _send(self, code: int, ctype: str, body: bytes):
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _json(self, code: int, obj: dict):
+            self._send(code, "application/json; charset=utf-8",
+                       json.dumps(obj, ensure_ascii=False).encode("utf-8"))
+
+        def do_GET(self):
+            path = self.path.split("?")[0]
+            if path in ("/", "/index.html"):
+                self._send(200, "text/html; charset=utf-8", OUT.read_bytes())
+            elif path == "/api/data":
+                self._json(200, build_payload())  # 实时重扫，保证最新
+            else:
+                self._json(404, {"error": "not found"})
+
+        def do_POST(self):
+            if self.path != "/api/advice":
+                self._json(404, {"error": "not found（白名单外端点不存在）"})
+                return
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                if length <= 0 or length > MAX_BODY:
+                    raise ValueError(f"请求体需在 1~{MAX_BODY} 字节")
+                entry = json.loads(self.rfile.read(length).decode("utf-8"))
+                rec = append_advice(entry)
+                self._json(200, {"ok": True, "entry": rec})
+                print(f"[advice] 新增 {rec['id']} ({rec['case_id']})", flush=True)
+            except (ValueError, json.JSONDecodeError) as e:
+                self._json(400, {"ok": False, "error": str(e)})
+
+        def log_message(self, fmt, *log_args):  # 静默逐请求访问日志
+            pass
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    print(f"Serving http://127.0.0.1:{args.port}/   (仅本机可达；Ctrl+C 停止)")
+    print("可用端点: GET / · GET /api/data · POST /api/advice —— 无执行类端点")
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("\nserver 已停止")
 
 
 TEMPLATE = r"""<!DOCTYPE html>
@@ -276,6 +391,14 @@ footer{text-align:center;color:var(--mw-muted);font-size:12px;padding:20px;borde
 ul.clean{list-style:none;background:var(--mw-surface);border:1px solid var(--mw-hairline);border-radius:8px;padding:4px 16px}
 ul.clean li{padding:8px 0;border-bottom:1px dashed var(--mw-hairline);font-size:13px}
 ul.clean li:last-child{border-bottom:0}
+.filterbar,.pairbar,.formrow{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:10px 0;background:var(--mw-surface);border:1px solid var(--mw-hairline);border-radius:8px;padding:10px 12px}
+.filterbar input[type=text],.pairbar select,.filterbar select,.formrow input,.formrow select{border:1px solid var(--mw-hairline);border-radius:8px;background:var(--mw-surface);color:var(--mw-ink);font-family:var(--font);font-size:13px;padding:6px 10px;min-height:32px}
+.filterbar input[type=text]{flex:1;min-width:160px}
+.formrow textarea{width:100%;min-height:72px;border:1px solid var(--mw-hairline);border-radius:8px;background:var(--mw-surface);color:var(--mw-ink);font-family:var(--font);font-size:13px;padding:8px 10px;resize:vertical}
+.btn-accent{background:var(--accent-strong);color:var(--mw-surface);border:0;border-radius:8px;padding:7px 18px;font-size:13px;font-weight:600;font-family:var(--font);cursor:pointer;min-height:34px}
+.btn-accent:hover{filter:brightness(1.08)}
+.btn-ghost{background:var(--mw-surface);color:var(--mw-accent);border:1px solid var(--accent-border);border-radius:8px;padding:7px 14px;font-size:13px;font-weight:600;font-family:var(--font);cursor:pointer;min-height:34px}
+.fcount{font-size:12px;color:var(--mw-muted);margin-left:auto}
 </style>
 </head>
 <body>
@@ -294,9 +417,29 @@ ul.clean li:last-child{border-bottom:0}
     <h2>运行分布（按被测对象）</h2><div id="distSut"></div>
     <h2>运行分布（按模型 / 变体）</h2><div id="distModel"></div>
   </section>
-  <section class="view" id="v-runs"><div id="runList"></div></section>
+  <section class="view" id="v-runs">
+    <div class="filterbar">
+      <input type="text" id="fText" placeholder="搜索标题 / case / 对象 / 模型…">
+      <select id="fCase"><option value="">全部 case</option></select>
+      <select id="fVariant"><option value="">全部变体</option><option value="baseline">baseline</option><option value="optimized">optimized</option><option value="__group_control">对照臂</option></select>
+      <select id="fVerdict"><option value="">全部结论</option><option value="pass">pass</option><option value="fail">fail</option><option value="blocked">blocked</option><option value="__group_other">其他</option></select>
+      <span class="fcount" id="fCount"></span>
+    </div>
+    <div id="runList"></div>
+  </section>
   <section class="view" id="v-findings"><div id="findingList"></div></section>
-  <section class="view" id="v-compare"><div id="compareBox"></div></section>
+  <section class="view" id="v-compare">
+    <h2>优化前后对比（自动配对）</h2><div id="compareBox"></div>
+    <h2>自由配对对比</h2>
+    <div class="pairbar">
+      <label style="font-size:12px;color:var(--mw-muted)">Run A</label>
+      <select id="cmpA" style="max-width:340px"></select>
+      <span style="font-weight:600">vs</span>
+      <label style="font-size:12px;color:var(--mw-muted)">Run B</label>
+      <select id="cmpB" style="max-width:340px"></select>
+    </div>
+    <div id="customPair"></div>
+  </section>
   <section class="view" id="v-notes"><div id="notesBox"></div></section>
 </main>
 <footer>本页面由 build_web.py 自动生成（agent 调起）· 本地只读，无执行入口 · 原始数据不出本机</footer>
@@ -334,24 +477,6 @@ $("#sutList").innerHTML=DATA.objects.map(o=>{
   </div></div>`}).join("")||'<div class="empty">暂无被测对象</div>';
 const badgePass=p=>p?'<span class="badge b-pass">✓ 通过</span>':'<span class="badge b-fail">✗ 未通过</span>';
 const badgeVerdict=v=>v==='pass'?'<span class="badge b-pass">✓ 通过</span>':v==='fail'?'<span class="badge b-fail">✗ 未通过</span>':v==='blocked'?'<span class="badge b-sev-mid">⚠ 评分未裁决</span>':'<span class="badge b-sev-low">'+esc(v)+'</span>';
-$("#runList").innerHTML=DATA.runs.map(r=>{
-  const asserts=r._assertions.map(a=>`<tr><td>${badgePass(a.pass)}</td><td>${esc(a.desc)}</td><td>${esc(a.type)}</td><td class="reason">${esc(a.reason)}</td></tr>`).join("");
-  const dels=(r.process?.delegations||[]).map(d=>`<tr><td>${esc(d.stage)}</td><td>${esc(d.agent)}</td><td style="font-family:var(--mono);font-size:11px">${esc(d.session)}</td><td>${esc(d.acceptance)}</td></tr>`).join("");
-  const anom=(r.anomalies||[]).map(id=>{const f=DATA.findings.find(x=>x.id===id);return f?`<span class="badge b-sev-mid">${f.id} ${esc(f.title)}</span>`:id}).join(" ");
-  return `<div class="run"><div class="run-head" onclick="this.parentNode.classList.toggle('open')">
-    ${badgePass(r.verdict==='pass')}
-    <span class="t">${esc(r.title)}</span><span class="meta">${esc(r.case_id)} · ${esc(r.date)} · ${esc(r.sut.name)}@${esc(r.sut.commit||'')} · ${esc(r.model)}</span></div>
-  <div class="run-body">
-    <div class="kv"><b>输入</b>　${esc(r.input)}</div>
-    <div class="kv"><b>宿主</b>　${esc(r.host)} ｜ <b>声明自主度</b>　${esc(r.process?.autonomy_declared||'')} ｜ <b>返工</b>　${r.process?.rework_count??'—'}</div>
-    ${dels?`<h2>委派关系与验收</h2><table><tr><th>阶段</th><th>执行者</th><th>子会话</th><th>验收</th></tr>${dels}</table>`:""}
-    <div class="kv"><b>终审</b>　${esc(r.process?.final_review||'')}</div>
-    <div class="kv"><b>权限决策证据</b>　${esc(r.process?.permission_evidence||'')}</div>
-    ${asserts?`<h2>Promptfoo 评分（${r._assertions.filter(a=>a.pass).length}/${r._assertions.length}）</h2><table><tr><th></th><th>维度</th><th>类型</th><th>评分理由</th></tr>${asserts}</table>`:""}
-    ${r._deliverable_text?`<h2>交付物（${esc(r.deliverable)}）</h2><pre>${esc(r._deliverable_text)}</pre>`:""}
-    ${anom?`<div class="kv"><b>关联异常</b>　${anom}</div>`:""}
-    ${r.human_notes?`<div class="kv"><b>备注</b>　${esc(r.human_notes)}</div>`:""}
-  </div></div>`}).join("")||'<div class="empty">暂无运行记录</div>';
 $("#findingList").innerHTML=`<table><tr><th>ID</th><th>严重度</th><th>标题</th><th>状态</th><th>详情</th></tr>${DATA.findings.map(f=>`<tr><td>${f.id}</td><td><span class="badge ${f.severity==='高'?'b-sev-high':f.severity==='中'?'b-sev-mid':'b-sev-low'}">${f.severity==='高'?'! ':f.severity==='中'?'● ':'○ '}${esc(f.severity)}</span></td><td>${esc(f.title)}</td><td>${esc(f.status)}</td><td class="reason">${esc(f.detail)}</td></tr>`).join("")}</table>`;
 const cmp=Object.entries(DATA.comparisons);
 const getRun=dir=>DATA.runs.find(r=>r["_dir"]===dir);
@@ -388,6 +513,126 @@ const stI=s=>s==='applied'?'✓ ':s==='rejected'?'✗ ':'● ';
 const advTable=adv.length?`<table><tr><th>ID</th><th>Case</th><th>建议</th><th>状态</th><th>评审人</th><th>日期</th><th>关联复测</th></tr>${adv.map(a=>`<tr><td>${esc(a.id)}</td><td>${esc(a.case_id)}</td><td class="reason">${esc(a.advice)}</td><td><span class="badge ${stB(a.status)}">${stI(a.status)}${esc(a.status)}</span>${a.draft?' <span class="badge b-sev-low">draft</span>':''}</td><td>${esc(a.submitted_by||'')}</td><td>${esc(a.date||'')}</td><td>${esc(a.linked_run||'—')}</td></tr>`).join("")}</table>`:'';
 const sugg=DATA.runs.flatMap(r=>(r.suggestions||[]).map(s=>[r.case_id,s]));
 $("#notesBox").innerHTML=advTable+(sugg.length?`<h2>运行内自动备注（非人工提交，供评审参考）</h2><ul class="clean">${sugg.map(([c,s])=>`<li><b>[${esc(c)}]</b> ${esc(s)}</li>`).join("")}</ul>`:(adv.length?'':'<div class="empty">暂无人工建议</div>'));
+
+/* ===== G14 逐 case 建议表单（--serve 模式下可写回 advice.json） ===== */
+const onServe=location.protocol.startsWith('http');
+$("#notesBox").insertAdjacentHTML('beforeend',`
+<h2>提交逐 case 建议（G14）</h2>
+<div style="font-size:12px;color:var(--mw-muted);margin:4px 0">建议追加写入 eval/records/advice.json；原始运行证据只读不受影响。${onServe?'':'<b>当前为 file:// 直开，写回不可用——请用 build_web.py --serve 本地部署模式。</b>'}</div>
+<div class="formrow" style="flex-direction:column;align-items:stretch">
+  <div style="display:flex;gap:8px;flex-wrap:wrap">
+    <select id="advCase" required></select>
+    <input id="advBy" placeholder="评审人（可选）" style="max-width:160px">
+    <input id="advRun" placeholder="关联运行目录（可选，如 td-01-formal-r3）" style="flex:1;min-width:200px">
+  </div>
+  <textarea id="advText" placeholder="针对该 case 的改进建议：问题定位、优化方向、预期效果…"></textarea>
+  <div><button class="btn-accent" onclick="submitAdvice()" ${onServe?'':'disabled'}>提交建议</button>
+  <span id="advMsg" class="reason"></span></div>
+</div>`);
+{
+  const caseIds=[...new Set([...DATA.runs.map(r=>r.case_id),...DATA.advice.map(a=>a.case_id)])].filter(Boolean).sort();
+  $("#advCase").innerHTML='<option value="">— 选择 case —</option>'+caseIds.map(c=>`<option>${esc(c)}</option>`).join('');
+}
+async function submitAdvice(){
+  const m=$("#advMsg");
+  const body={case_id:$("#advCase").value, advice:$("#advText").value.trim(),
+    submitted_by:$("#advBy").value.trim(), linked_run:$("#advRun").value.trim()};
+  if(!body.case_id||!body.advice){m.textContent='⚠ 请选择 case 并填写建议内容';m.style.color='var(--mw-ink)';return}
+  try{
+    const r=await fetch('/api/advice',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const j=await r.json();
+    if(j.ok){DATA.advice.push(j.entry);renderNotesTable();$("#advText").value='';
+      m.textContent=`✓ 已提交 ${j.entry.id}`;}
+    else{m.textContent='✗ '+(j.error||'提交失败');}
+  }catch(e){m.textContent='✗ 网络/服务错误：'+e}
+}
+function renderNotesTable(){
+  const a2=DATA.advice;
+  const t=a2.length?`<table><tr><th>ID</th><th>Case</th><th>建议</th><th>状态</th><th>评审人</th><th>日期</th><th>关联复测</th></tr>${a2.map(a=>`<tr><td>${esc(a.id)}</td><td>${esc(a.case_id)}</td><td class="reason">${esc(a.advice)}</td><td><span class="badge ${stB(a.status)}">${stI(a.status)}${esc(a.status)}</span></td><td>${esc(a.submitted_by||'')}</td><td>${esc(a.date||'')}</td><td>${esc(a.linked_run||'—')}</td></tr>`).join("")}</table>`:'<div class="empty">暂无人工建议</div>';
+  // 仅替换表格区域：插入在表单 h2 之前
+  const formStart=$("#notesBox").innerHTML.indexOf('<h2>提交逐 case 建议（G14）</h2>');
+  if(formStart>=0)$("#notesBox").innerHTML=t+$("#notesBox").innerHTML.slice(formStart);
+}
+
+/* ===== 运行记录筛选 ===== */
+const baseCase=s=>(String(s).match(/^(case-\d+|td-\d+|cr-\d+)/)||[''])[0];
+const allRuns=DATA.runs;
+function renderRuns(filtered){
+  $("#runList").innerHTML=filtered.length?filtered.map(r=>{
+    const asserts=r._assertions.map(a=>`<tr><td>${badgePass(a.pass)}</td><td>${esc(a.desc)}</td><td>${esc(a.type)}</td><td class="reason">${esc(a.reason)}</td></tr>`).join("");
+    const dels=(r.process?.delegations||[]).map(d=>`<tr><td>${esc(d.stage)}</td><td>${esc(d.agent)}</td><td style="font-family:var(--mono);font-size:11px">${esc(d.session)}</td><td>${esc(d.acceptance)}</td></tr>`).join("");
+    const anom=(r.anomalies||[]).map(id=>{const f=DATA.findings.find(x=>x.id===id);return f?`<span class="badge b-sev-mid">${f.id} ${esc(f.title)}</span>`:id}).join(" ");
+    return `<div class="run"><div class="run-head" onclick="this.parentNode.classList.toggle('open')">
+      ${badgePass(r.verdict==='pass')}
+      <span class="t">${esc(r.title)}</span><span class="meta">${esc(r.case_id)} · ${esc(r.date)} · ${esc(r.sut.name)}@${esc(r.sut.commit||'')} · ${esc(r.model)}</span></div>
+    <div class="run-body">
+      <div class="kv"><b>输入</b>　${esc(r.input)}</div>
+      <div class="kv"><b>宿主</b>　${esc(r.host)} ｜ <b>声明自主度</b>　${esc(r.process?.autonomy_declared||'')} ｜ <b>返工</b>　${r.process?.rework_count??'—'}</div>
+      ${dels?`<h2>委派关系与验收</h2><table><tr><th>阶段</th><th>执行者</th><th>子会话</th><th>验收</th></tr>${dels}</table>`:""}
+      <div class="kv"><b>终审</b>　${esc(r.process?.final_review||'')}</div>
+      <div class="kv"><b>权限决策证据</b>　${esc(r.process?.permission_evidence||'')}</div>
+      ${asserts?`<h2>Promptfoo 评分（${r._assertions.filter(a=>a.pass).length}/${r._assertions.length}）</h2><table><tr><th></th><th>维度</th><th>类型</th><th>评分理由</th></tr>${asserts}</table>`:""}
+      ${r._deliverable_text?`<h2>交付物（${esc(r.deliverable)}）</h2><pre>${esc(r._deliverable_text)}</pre>`:""}
+      ${anom?`<div class="kv"><b>关联异常</b>　${anom}</div>`:""}
+      ${r.human_notes?`<div class="kv"><b>备注</b>　${esc(r.human_notes)}</div>`:""}
+    </div></div>`}).join(""):'<div class="empty">没有符合筛选条件的运行</div>';
+  $("#fCount").textContent=`${filtered.length} / ${allRuns.length} 条`;
+}
+function applyFilters(){
+  const kw=$("#fText").value.trim().toLowerCase(), fc=$("#fCase").value,
+        fv=$("#fVariant").value, fvj=$("#fVerdict").value;
+  const filtered=allRuns.filter(r=>{
+    if(fc&&baseCase(r.case_id)!==fc)return false;
+    const variant=r.sut?.variant||'baseline';
+    if(fv==='__group_control'){if(!variant.startsWith('control'))return false}
+    else if(fv&&variant!==fv)return false;
+    if(fvj==='__group_other'){if(['pass','fail','blocked'].includes(r.verdict))return false}
+    else if(fvj&&r.verdict!==fvj)return false;
+    if(kw&&![r.title,r.case_id,r.sut?.name,r.model,r._dir].join(' ').toLowerCase().includes(kw))return false;
+    return true});
+  renderRuns(filtered);
+}
+{
+  const cases=[...new Set(allRuns.map(r=>baseCase(r.case_id)).filter(Boolean))].sort();
+  $("#fCase").innerHTML+='<option>'+cases.join('</option><option>')+'</option>';
+  ["#fText","#fCase","#fVariant","#fVerdict"].forEach(s=>{
+    const el=$(s);el.addEventListener(el.tagName==='INPUT'?'input':'change',applyFilters)});
+  renderRuns(allRuns);
+}
+
+/* ===== 自由配对对比 ===== */
+const pairDiff=(ra,rb)=>{
+  const A=ra?ra._assertions:[],B=rb?rb._assertions:[];
+  const dims=[...new Set([...A.map(a=>a.desc),...B.map(a=>a.desc)])];
+  const rows=dims.map(d=>{
+    const p=A.find(a=>a.desc===d),q=B.find(a=>a.desc===d);
+    const x=p?.pass,y=q?.pass;
+    let chg='<span style="color:var(--mw-muted)">不变</span>';
+    if(x===false&&y===true)chg='<span class="badge b-pass">↑ 提升</span>';
+    else if(x===true&&y===false)chg='<span class="badge b-fail">↓ 退化</span>';
+    else if(x===undefined&&y!==undefined)chg='<span class="badge b-sev-low">仅 B 有</span>';
+    else if(y===undefined&&x!==undefined)chg='<span class="badge b-sev-low">仅 A 有</span>';
+    let row=`<tr><td class="reason">${esc(d)}</td><td>${x===undefined?'—':badgePass(x)}</td><td>${y===undefined?'—':badgePass(y)}</td><td>${chg}</td></tr>`;
+    if(x===false||y===false){
+      const fr=(x===false?p?.reason:'')||(y===false?q?.reason:'')||'';
+      if(fr)row+=`<tr><td colspan="4" style="padding:2px 8px 6px 24px;color:var(--mw-muted);font-size:12px">↳ ${esc(fr.slice(0,150))}</td></tr>`;
+    }
+    return row}).join("");
+  const head=(lbl,run)=>run?`${lbl}: <b>${esc(run.title)}</b> <span class="reason">${esc(run.case_id)} · ${esc(run.date)} · ${esc(run.sut.name)} · ${esc(run.sut.variant||'')}</span>`:`${lbl}: —`;
+  return `<div class="kv">${head('A',ra)}</div><div class="kv">${head('B',rb)}</div>`+
+    (dims.length?`<table><tr><th>断言维度</th><th>A</th><th>B</th><th>变化</th></tr>${rows}</table>`:'<div class="empty">所选运行缺少断言数据</div>');
+};
+const runLabel=r=>`${r.case_id} · ${r.date} · ${(r.sut?.variant||'?')} · ${r.verdict} · ${r._dir}`;
+function initPair(){
+  const opts=allRuns.map((r,i)=>`<option value="${i}">${esc(runLabel(r))}</option>`).join("");
+  $("#cmpA").innerHTML=opts;$("#cmpB").innerHTML=opts;
+  const baseIdx=allRuns.findIndex(r=>/^(td-01|cr-04)-formal-r1$/.test(r._dir));
+  const optIdx=allRuns.findIndex(r=>/-opt-formal-r5(\-retry\d+)?$/.test(r._dir));
+  $("#cmpA").value=Math.max(baseIdx,0);$("#cmpB").value=optIdx>=0?optIdx:allRuns.length-1;
+  const upd=()=>{$("#customPair").innerHTML=pairDiff(allRuns[+$("#cmpA").value],allRuns[+$("#cmpB").value])};
+  $("#cmpA").onchange=upd;$("#cmpB").onchange=upd;upd();
+}
+initPair();
 </script>
 </body>
 </html>

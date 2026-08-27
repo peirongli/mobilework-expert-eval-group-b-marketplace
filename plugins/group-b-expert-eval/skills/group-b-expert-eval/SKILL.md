@@ -55,12 +55,18 @@ mobilework-expert-manager 创建/优化副本 → 同条件复测。
 5. `build_web.py`（2026-08-27 起，本插件内）：**结果 Web 由 agent 直接调起生成**。
    用户说"查看结果 / 重建报告页 / 看看评测数据"时调用：
    ```
-   python <scripts>/build_web.py                     # 默认主题
+   python <scripts>/build_web.py                     # 静态模式：生成后 file:// 打开
    python <scripts>/build_web.py --accent "#0052d9"  # 换主题色
    python build_web.py --title "自定义标题"           # 换标题
+   python build_web.py --serve [--port 8763]         # 本地部署模式（可交互）
    ```
-   输出 `<eval>/web/index.html` 并打印 file:// URL——agent 将该路径给用户
-   （OpenWork 内置浏览器或本机浏览器打开即可，无需部署服务）。
+   交互能力（--serve 模式，仅绑 127.0.0.1）：
+   - 运行记录按 case/变体/结论/关键词筛选；
+   - 对比视图可任选两次运行自由配对做断言级 diff；
+   - 页面上直接**提交逐 case 建议**（G14），追加写回 advice.json——
+     **原始运行证据永不改写，无任何发起运行类端点**（任务书 §3.2 红线）。
+   agent 应将 `http://127.0.0.1:<port>/` 给用户在浏览器打开；任务结束提醒用户
+   Ctrl+C 或由 agent 停止进程。静态模式下提交按钮自动禁用并提示改用 --serve。
    **AI 自由填写前端模板**：HTML/CSS 模板即脚本内的 TEMPLATE 字符串——
    agent 可按用户要求直接编辑该段定制布局/配色/卡片/图表，保存后重新调起生效。
 
