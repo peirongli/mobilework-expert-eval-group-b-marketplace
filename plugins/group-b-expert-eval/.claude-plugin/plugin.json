@@ -2,7 +2,7 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "group-b-expert-eval",
   "displayName": "Group B Expert Eval",
-  "version": "0.3.6",
+  "version": "0.3.7",
   "description": "MobileWork 专家（团）观测、评估、基准测试与优化：case 管理、真实 OpenCode 运行、Promptfoo 评测、统一证据链、逐 case 人工建议、本地结果 Web 与优化副本复测闭环。",
   "author": {
     "name": "peirongli"
