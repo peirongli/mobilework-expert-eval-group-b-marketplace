@@ -1,20 +1,22 @@
 ---
 name: group-b-expert-eval
 description: >-
-  B 组 MobileWork 专家（团）评测与优化入口。当用户要求选择被测对象、配置 case、
-  发起基线运行、查看证据与评分、提交逐 case 人工建议、生成优化副本或复测时使用。
-  依赖公共插件 mobilework-expert-manager 完成优化副本的生成与校验。
+  B 组 MobileWork 专家（团）评测与优化入口（通用插件）。当用户要求选择被测对象、
+  配置 case、创建新专家包、发起基线运行、查看证据与评分、重建结果 Web、提交逐 case
+  人工建议、生成优化副本或复测时使用。
+  依赖公共插件 mobilework-expert-manager 完成专家包创建/优化副本的生成与校验。
 ---
 
 # Group B 专家（团）评测优化插件
 
-面向 OpenWork 对话的评测全流程入口。固定运行边界：
+面向 OpenWork 对话的评测全流程入口（通用：不绑定特定领域对象）。固定运行边界：
 OpenWork 对话 → 本插件 → 真实 OpenCode 专家（团）→ Promptfoo → 本地结果 Web →
-mobilework-expert-manager 优化副本 → 同条件复测。
+mobilework-expert-manager 创建/优化副本 → 同条件复测。
+**全流程由 agent 在对话中调起脚本完成，用户无需切换终端。**
 
-## 能力与用法（2026-08-14 起，经 TD-01 实测）
+## 能力与用法（2026-08-27 更新，80 次 formal 实测验证）
 
-两个脚本（`scripts/`，评测工作区默认 `~/Desktop/MobileWork/eval`，可用
+四个脚本（`scripts/`，评测工作区默认 `~/Desktop/MobileWork/eval`，可用
 `MOBILEWORK_EVAL_ROOT` 覆盖）：
 
 1. `new_case.py`：按任务书 6.3 要素创建 case 定义文件。
@@ -44,22 +46,41 @@ mobilework-expert-manager 优化副本 → 同条件复测。
 
    已注册 case：td-01~04（tech-digest-team）、cr-01~04（code-review-expert）。
 
-3. `batch_run.py`（2026-08-19 起，`eval/scripts/`）：80 次正式批量编排。
-   循环 8 case × 2 variant × 5 次，`run_kind=formal`，异常自动补跑（`--max-retries`），
-   超时 1800s/次，跑完自动 `diagnose --diff baseline vs optimized`。
+4. `batch_score.py` / `batch_run.py`（`eval/scripts/`，W7 落地）：
+   - `batch_run.py`：80 次正式批量编排（8 case × 2 variant × 5 次，
+     run_kind=formal，异常自动补跑，跑完自动 diagnose --diff）。
+     **长运行须在终端执行**（编排器内含交互式预检，不适合对话内阻塞等待）：
+     `python eval/scripts/batch_run.py --run-kind formal --resume`
+   - `batch_score.py`：CR-01/02 的 F1 批量评分（blocked→pass/fail 自动裁决）
+5. `build_web.py`（2026-08-27 起，本插件内）：**结果 Web 由 agent 直接调起生成**。
+   用户说"查看结果 / 重建报告页 / 看看评测数据"时调用：
    ```
-   python eval/scripts/batch_run.py                           # 跑全部 80 次
-   python eval/scripts/batch_run.py --cases td-01,cr-04       # 只跑指定 case
-   python eval/scripts/batch_run.py --dry-run                  # 只打印计划
-   python eval/scripts/batch_run.py --resume                   # 跳过已完成的 run 目录
+   python <scripts>/build_web.py                     # 默认主题
+   python <scripts>/build_web.py --accent "#0052d9"  # 换主题色
+   python build_web.py --title "自定义标题"           # 换标题
    ```
+   输出 `<eval>/web/index.html` 并打印 file:// URL——agent 将该路径给用户
+   （OpenWork 内置浏览器或本机浏览器打开即可，无需部署服务）。
+   **AI 自由填写前端模板**：HTML/CSS 模板即脚本内的 TEMPLATE 字符串——
+   agent 可按用户要求直接编辑该段定制布局/配色/卡片/图表，保存后重新调起生效。
+
+## 接入新被测对象（低门槛创建，对话式）
+
+不同类型/应用场景的专家（团）接入评测只需三步，全部可由 agent 在对话中引导完成：
+
+1. **创建专家包**：引导用户从 OpenWork 对话调用公共 mobilework-expert-manager
+   （`create_expert.py`），人工整理 expert.json 后生成派生产物并校验；
+2. **注册 case**：用本插件 `new_case.py` 创建 case 定义文件，并在
+   `run_case.py` 的 case 注册表登记任务输入与评分方式（结构化=断言 /
+   混合式=rubric+硬约束 / 开放式=rubric+人工复核）；
+3. **跑基线**：`run_case.py --case <new-case> --run-kind pilot` 验证全链路，
+   再进入正式统计。评分配置复用同领域模板或按 case 类型新建。
 
 尚未覆盖（诚实声明）：
-- 优化副本**生成**仍由人调用公共 mobilework-expert-manager 完成（create_expert.py），
-  本插件负责发起**复测**与证据落盘（`--variant optimized` 已脚本化，第 6 周验证）。
-- CR-01/02 的 F1 评分含人工裁决环节（finding↔EXPECTED 匹配）：
-  run_case.py 自动生成 `score-match-draft.json` 草稿，人工复核后写 `score-final.json`。
-- 本地结果 Web 重建需在 eval 工作区手动执行 `eval/web/build.py`。
+- 优化副本**生成**仍由人主导调用公共 mobilework-expert-manager 完成（create_expert.py），
+  本插件负责发起**复测**与证据落盘（`--variant optimized` 已脚本化）。
+- CR-01/02 类 seeded case 的 F1 评分草稿由 run_case.py 自动生成，
+  终稿裁决已由 `batch_score.py` 自动化（额外发现标 valid_extra 不计 fp）。
 
 ## 使用约定
 
