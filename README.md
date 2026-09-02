@@ -60,14 +60,20 @@ claude plugin list --json
 claude plugin details group-b-expert-eval@mobilework-expert-eval-group-b
 ```
 
-### OpenWork 导入（验收路径，v0.3.6 子目录 URL）
+### OpenWork 导入（验收路径，v0.3.8 子目录 URL）
 
 1. 公共 manager（冻结 SHA）：
    `https://github.com/xiaodong528/mobilework-expert-manager/tree/917a200804cf56ccf67e1c405b22caf710d78eb1`
 2. 本组插件：
-   `https://github.com/peirongli/mobilework-expert-eval-group-b-marketplace/tree/v0.3.6/plugins/group-b-expert-eval`
+   `https://github.com/peirongli/mobilework-expert-eval-group-b-marketplace/tree/v0.3.8/plugins/group-b-expert-eval`
 
 均走 Settings → Extensions → Install from GitHub → Preview → Install → Refresh。
+
+> **OpenWork 宿主同步边界（如实说明）**：OpenWork 导入插件时投影到工作区
+> `.opencode/skills/<plugin>-plugin/` 的内容以 `SKILL.md` 为主；`scripts/`
+> 下的可执行脚本（run_case.py 等）需从本仓库对应 tag 手动复制到投影目录
+> （本组在真实工作区用 `git hash-object` 逐文件核对过 5/5 一致）。
+> 完整边界与复现前提见 [docs/REPRODUCE.md](docs/REPRODUCE.md)。
 
 ### 发起评测 / 复测 / 看结果
 
@@ -109,6 +115,8 @@ docs/
 | v0.3.4 | Chart.js 本地仪表盘 + 80 次运行矩阵热力格 + 对比徽章汇总 |
 | v0.3.5 | 运行记录表格/卡片双视图 + Δ 通过率正负柱状 + 耗时对比图 |
 | v0.3.6 | case-001（W2 链路验证）归档出正式视图，runs 口径收敛至正式 8 case |
+| v0.3.7 | README 重写——反映课题成果与插件现状 |
+| v0.3.8 | 文档一致性修复：README/REPRODUCE 导入 URL 统一至最新 tag；补 OpenWork 宿主同步边界如实说明 |
 
 ## 治理摘要
 

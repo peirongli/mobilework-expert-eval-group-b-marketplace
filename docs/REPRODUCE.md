@@ -2,6 +2,26 @@
 
 从零复现 B 组 MobileWork 专家评测全流程的完整步骤。
 
+## 0. 复现边界（先读）
+
+本仓库是**插件分发与治理载体**，不是全部交付物的载体。按课题任务书边界：
+
+1. **OpenWork 宿主同步边界**：OpenWork 从 GitHub 导入插件时，落到工作区
+   `.opencode/skills/<plugin>-plugin/` 投影的内容以 `SKILL.md` 为主；
+   `scripts/`（run_case.py / build_web.py 等）需手动从本仓库对应 tag 复制到投影目录：
+   ```bash
+   git clone https://github.com/peirongli/mobilework-expert-eval-group-b-marketplace.git
+   cp mobilework-expert-eval-group-b-marketplace/plugins/group-b-expert-eval/skills/group-b-expert-eval/scripts/*.py \
+      <工作区>/.opencode/skills/group-b-expert-eval-plugin/scripts/
+   ```
+2. **评测工作区不在本仓库**：case 定义、被测专家包（tech-digest-team /
+   code-review-expert 及其优化副本）、运行证据与结果 Web 均在本组评测工作区
+   `eval/`（本地交付，含 API key 等敏感信息，按任务书不上传）。复现完整评测
+   需按 §1 准备环境并重建工作区结构。
+3. **统计口径**：正式基准为 80 次有效运行（run_kind=formal）。受运行间方差与
+   LLM 判官严格度波动影响，逐次运行的判定**不保证逐位重现**；复现的是方法与
+   流程，统计结论以本组基准报告的置信区间口径为准。
+
 ## 1. 环境准备
 
 ```bash
@@ -32,8 +52,8 @@ claude plugin validate ./plugins/group-b-expert-eval --strict
    - Preview → 核对 owner=xiaodong528, ref=冻结 SHA → Install → Refresh
 
 2. **B 组插件**：同上
-   - URL: `https://github.com/peirongli/mobilework-expert-eval-group-b-marketplace/tree/v0.3.1/plugins/group-b-expert-eval`
-   - Preview → 核对 owner=peirongli, tag=v0.3.1 → Install → Refresh
+   - URL: `https://github.com/peirongli/mobilework-expert-eval-group-b-marketplace/tree/v0.3.8/plugins/group-b-expert-eval`
+   - Preview → 核对 owner=peirongli, tag=v0.3.8 → Install → Refresh
 
 3. 在扩展列表中确认两个插件均已安装。
 
@@ -85,5 +105,5 @@ python3 eval/scripts/batch_score.py
 
 ## 10. 跨组复测
 
-其他组导入 B 组插件（v0.3.1 子目录 URL），复现至少 1 个新 case。
+其他组导入 B 组插件（v0.3.8 子目录 URL），复现至少 1 个新 case。
 ENVIRONMENT.md 七.3 有完整复现命令。
