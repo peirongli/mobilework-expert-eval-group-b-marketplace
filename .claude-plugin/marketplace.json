@@ -6,14 +6,14 @@
   },
   "metadata": {
     "description": "B 组 MobileWork 专家（团）评测优化插件市场：本组评测插件 + 公共 mobilework-expert-manager 引用",
-    "version": "0.3.7"
+    "version": "0.3.8"
   },
   "plugins": [
     {
       "name": "group-b-expert-eval",
       "source": "./plugins/group-b-expert-eval",
       "description": "B 组 MobileWork 专家（团）观测、评估、基准测试与优化插件：case 管理、OpenCode 真实运行、Promptfoo 评测、证据链、本地 Web 与优化副本闭环",
-      "version": "0.3.7",
+      "version": "0.3.8",
       "license": "MIT"
     },
     {
